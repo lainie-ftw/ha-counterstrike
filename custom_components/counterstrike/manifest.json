@@ -1,0 +1,9 @@
+{
+    "domain": "counterstrike",
+    "name": "Counterstrike",
+    "documentation": "https://github.com/lainie-ftw/ha-counterstrike",
+    "dependencies": [],
+    "codeowners": ["@lainie-ftw"],
+    "requirements": [],
+    "version": "1.0.0"
+}
