@@ -3,7 +3,8 @@
     "name": "Counterstrike",
     "documentation": "https://github.com/lainie-ftw/ha-counterstrike",
     "dependencies": [],
-    "codeowners": ["@lainie-ftw"],
-    "requirements": [],
+    "codeowners": [],
+    "iot_class": "local_polling",
+    "requirements": ["beautifulsoup4==4.12.3"],
     "version": "1.0.0"
-}
+  }
