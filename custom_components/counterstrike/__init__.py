@@ -1,89 +1,197 @@
-"""
-The "hello world" custom component.
+import asyncio
+from datetime import datetime, timedelta
+import logging
 
-This component implements the bare minimum that a component should implement.
-
-Configuration:
-
-To use the hello_world component you will need to add the following to your
-configuration.yaml file.
-
-counterstrike:
-"""
-from __future__ import annotations
+import aiohttp
+from bs4 import BeautifulSoup
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import Entity
+from homeassistant.helpers.entity_component import EntityComponent
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.util import slugify
+
+_LOGGER = logging.getLogger(__name__)
 
 # The domain of your component. Should be equal to the name of your component.
 DOMAIN = "counterstrike"
+CONF_COUNTERSTRIKE = "counterstrike"
+
+# Data in attributes:
+# team: abbrev, name, link, logo
+# opponent: abbrev, name, link, logo
+# tournament: name, link
+# match: start time, view link
+
+# Elements of the integration
+CONF_TEAM = "team"
+CONF_OPPONENT = "opponent"
+CONF_TOURNAMENT = "tournament"
+CONF_NEXT_MATCH = "next_match"
+
+LIQUIPEDIA = "https://liquipedia.net/counterstrike/Liquipedia:Matches"
 
 
-def setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Set up a skeleton component."""
-    # States are in the format DOMAIN.OBJECT_ID.
-    hass.states.set('counterstrike.Hello_World', 'Works!')
+async def get_soup_object() -> BeautifulSoup:
+    async with aiohttp.ClientSession() as session, session.get(LIQUIPEDIA) as response:
+        html = await response.text()
+        return BeautifulSoup(html, "html.parser")
 
-    # Return boolean to indicate that initialization was successfully.
+
+async def async_setup(hass: HomeAssistant, config: ConfigType):
+    devices = []
+
+    teams = config[DOMAIN]
+
+    for team_to_process in teams:
+        team = team_to_process[CONF_TEAM]
+        devices.append(CounterstrikeEntity(team, hass))
+
+    # Set up component
+    component = EntityComponent(_LOGGER, DOMAIN, hass)
+    await component.async_add_entities(devices)
+
+    # Update state
+    tasks = [asyncio.create_task(device.update_data()) for device in devices]
+    await asyncio.wait(tasks)
+
+    # async_track_time_interval(hass, self.update_data(), timedelta(minutes=5))
+
+    _LOGGER.debug(devices)
+
     return True
-"""
-from datetime import datetime
-from bs4 import BeautifulSoup
-import urllib.request
 
-#set up list of teams to get
-team_list = ["Team_Liquid","G2_Esports", "Team_Falcons", "FaZe_Clan"]
 
-#team = team_list[0]
+class CounterstrikeEntity(Entity):
+    # _attr_should_poll = True
 
-for team in team_list:
-  url = "https://liquipedia.net/counterstrike/" + team
-  with urllib.request.urlopen(url) as response:
-    # Read the content
-    soup = BeautifulSoup(response, 'html.parser')
+    def __init__(self, input_team, hass):
+        self._unique_id = slugify(input_team)
+        self._name = input_team
+        self._team = None
+        self._opponent = None
+        self._tournament = None
+        self._next_match = None
 
-#get all the upcoming matches for the team
-#tables = soup.find_all('table', class_="infobox_matches_content")
+        self._state = None
+        self._extra_state_attributes = None
+        self.hass = hass
 
-  #first table is the next event
-  table = soup.find('table', class_="infobox_matches_content")
+    @property
+    def unique_id(self):
+        return self._unique_id
 
-  #Timestamp of next match OR event is found in span class="timer-object"
-  match_timestamp_span = table.find('span', class_="timer-object")
-  if match_timestamp_span is not None:
-    match_timestamp_string = match_timestamp_span['data-timestamp'].strip()
-    match_timestamp = datetime.fromtimestamp(int(match_timestamp_string))
-  else:
-    match_timestamp = datetime.now()
+    @property
+    def name(self):
+        return self._name
 
-  #rows[0] (tournament info) - if there's a td with class "team-right", that's a scheduled match and team-right is the opponent.
-  # Otherwise it's a scheduled tournament appearance with no scheduled match yet.
-  opponent = table.find('td', class_="team-right")
-  if opponent is None:
-    #tournament info is in a td with class="versus"
-    tournament_name = table.find('td', class_="versus").text.strip()
-    tournament_link = table.find('td', class_="versus").a['href'].strip()
-    event = {
-      "team": team,
-      "type": "tournament",
-      "opponent": None,
-      "tournament":tournament_name,
-      "link": "https://liquipedia.net" + tournament_link,
-      "start_time": match_timestamp
-    }
-  else:
-    #tournament info is in a div with class="tournament-text-flex"
-    tournament_name = table.find('div', class_="tournament-text-flex").text.strip()
-    tournament_link = table.find('div', class_="tournament-text-flex").a['href'].strip()
-    opponent_name = opponent.find('span', class_="team-template-text").text.strip()
-    event = {
-      "team": team,
-      "type": "match",
-      "opponent": opponent_name,
-      "tournament": tournament_name,
-      "link": "https://liquipedia.net" + tournament_link,
-      "start_time": match_timestamp
-    }
+    @property
+    def team(self):
+        return self._team
 
-  print(event)
-"""
+    @property
+    def opponent(self):
+        return self._opponent
+
+    @property
+    def tournament(self):
+        return self._tournament
+
+    @property
+    def next_match(self):
+        return self._next_match
+
+    @property
+    def state(self):
+        return self._state
+
+    @property
+    def extra_state_attributes(self):
+        return self._extra_state_attributes
+
+    async def update_data(self, *_):
+        soup = await get_soup_object()
+
+        href_to_search = "/counterstrike/" + self._name
+        team_link = soup.find(href=href_to_search)
+
+        if team_link is not None:
+            span = team_link.parent
+            span_parent = span.parent
+            td = span_parent.parent  # this is either team-right or team-left
+            tr = td.parent
+            team_match = tr.parent
+
+            # span class="timer-object timer-object-countdown-only" data-timestamp="1737123900"
+            match_timestamp_string = (
+                team_match.find("span", class_="timer-object")["data-timestamp"]
+            ).strip()
+            match_timestamp = datetime.fromtimestamp(int(match_timestamp_string))
+            # if match_timestamp <= datetime.now() and match_timestamp >= datetime.now():
+            # only add upcoming matches
+            team_left_full = team_match.find("td", class_="team-left")
+            team_left_name = team_left_full.find(
+                "span", class_="team-template-text"
+            ).text
+            team_left_link = team_left_full.find("a")["href"]
+            team_left_abbrev = team_left_link.split("/")[-1]
+
+            team_right_full = team_match.find("td", class_="team-right")
+            team_right_name = team_right_full.find(
+                "span", class_="team-template-text"
+            ).text
+            team_right_link = team_right_full.find("a")["href"]
+            team_right_abbrev = team_right_link.split("/")[-1]
+
+            if team_left_abbrev == self._name:
+                self._team = {
+                    "abbrev": team_left_abbrev,
+                    "name": team_left_name,
+                    "link": "https://liquipedia.net" + href_to_search,
+                    #  "logo":something,
+                }
+                self._opponent = {
+                    "abbrev": team_right_abbrev,
+                    "name": team_right_name,
+                    "link": "https://liquipedia.net" + team_right_link,
+                    #  "logo":something,
+                }
+            else:
+                self._team = {
+                    "abbrev": team_right_abbrev,
+                    "name": team_right_name,
+                    "link": "https://liquipedia.net" + href_to_search,
+                    #  "logo":something,
+                }
+                self._opponent = {
+                    "abbrev": team_left_abbrev,
+                    "name": team_left_name,
+                    "link": "https://liquipedia.net" + team_left_link,
+                    #  "logo":something,
+                }
+
+            self._tournament = {
+                "name": "tournament woo",
+                # "link":something,
+            }
+            self._next_match = {
+                "start_time": match_timestamp,
+                # "view_link":something,
+            }
+            self._state = self._next_match["start_time"]
+        else:
+            self._team = None
+            self._opponent = None
+            self._tournament = None
+            self._next_match = None
+
+        self._extra_state_attributes = {
+            CONF_TEAM: self._team,
+            CONF_OPPONENT: self._opponent,
+            CONF_TOURNAMENT: self._tournament,
+            CONF_NEXT_MATCH: self._next_match,
+        }
+
+        self.async_write_ha_state()
+        async_call_later(self.hass, 3600, self.update_data)
