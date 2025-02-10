@@ -18,6 +18,9 @@ _LOGGER = logging.getLogger(__name__)
 DOMAIN = "counterstrike"
 CONF_COUNTERSTRIKE = "counterstrike"
 
+# update every hour
+SCAN_INTERVAL = timedelta(seconds=3600)
+
 # Data in attributes:
 # team: abbrev, name, link, logo
 # opponent: abbrev, name, link, logo
@@ -64,7 +67,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType):
 
 
 class CounterstrikeEntity(Entity):
-    # _attr_should_poll = True
+    _attr_should_poll = True
 
     def __init__(self, input_team, hass):
         self._unique_id = slugify(input_team)
@@ -136,6 +139,7 @@ class CounterstrikeEntity(Entity):
             ).text
             team_left_link = team_left_full.find("a")["href"]
             team_left_abbrev = team_left_link.split("/")[-1]
+            team_left_icon_url = team_left_full.find("img")["src"]
 
             team_right_full = team_match.find("td", class_="team-right")
             team_right_name = team_right_full.find(
@@ -143,32 +147,33 @@ class CounterstrikeEntity(Entity):
             ).text
             team_right_link = team_right_full.find("a")["href"]
             team_right_abbrev = team_right_link.split("/")[-1]
+            team_right_icon_url = team_right_full.find("img")["src"]
 
             if team_left_abbrev == self._name:
                 self._team = {
                     "abbrev": team_left_abbrev,
                     "name": team_left_name,
                     "link": "https://liquipedia.net" + href_to_search,
-                    #  "logo":something,
+                    "logo": "https://liquipedia.net" + team_left_icon_url,
                 }
                 self._opponent = {
                     "abbrev": team_right_abbrev,
                     "name": team_right_name,
                     "link": "https://liquipedia.net" + team_right_link,
-                    #  "logo":something,
+                    "logo": "https://liquipedia.net" + team_right_icon_url,
                 }
             else:
                 self._team = {
                     "abbrev": team_right_abbrev,
                     "name": team_right_name,
                     "link": "https://liquipedia.net" + href_to_search,
-                    #  "logo":something,
+                    "logo": "https://liquipedia.net" + team_right_icon_url,
                 }
                 self._opponent = {
                     "abbrev": team_left_abbrev,
                     "name": team_left_name,
                     "link": "https://liquipedia.net" + team_left_link,
-                    #  "logo":something,
+                    "logo": "https://liquipedia.net" + team_left_icon_url,
                 }
 
             self._tournament = {
@@ -185,6 +190,7 @@ class CounterstrikeEntity(Entity):
             self._opponent = None
             self._tournament = None
             self._next_match = None
+            self._state = None
 
         self._extra_state_attributes = {
             CONF_TEAM: self._team,
@@ -192,6 +198,6 @@ class CounterstrikeEntity(Entity):
             CONF_TOURNAMENT: self._tournament,
             CONF_NEXT_MATCH: self._next_match,
         }
-
+        _LOGGER.debug("Updated data")
         self.async_write_ha_state()
         async_call_later(self.hass, 3600, self.update_data)
