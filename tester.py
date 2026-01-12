@@ -30,6 +30,183 @@ async def get_soup_object(link) -> BeautifulSoup:
         return BeautifulSoup(html, "html.parser")
 
 
+def build_liquipedia_url(path: str) -> str:
+    """
+    Build a full Liquipedia URL from a relative path.
+    
+    Args:
+        path: Relative path (e.g., "/counterstrike/Team_Name")
+        
+    Returns:
+        str: Full URL or empty string if path is empty
+    """
+    if not path:
+        return ""
+    return "https://liquipedia.net" + path
+
+
+def extract_team_info_from_block(block_team, team_name: str) -> dict:
+    """
+    Extract team information from a block-team div element.
+    Handles various URL formats including self-links and redlinks.
+    
+    Args:
+        block_team: BeautifulSoup element with class "block-team"
+        team_name: Name of the team we're tracking (for self-link detection)
+        
+    Returns:
+        dict: Team info with keys: name, abbrev, link, icon_url
+    """
+    import urllib.parse
+    
+    team_info = {
+        "name": "Unknown",
+        "abbrev": "Unknown",
+        "link": "",
+        "icon_url": "",
+    }
+    
+    if not block_team:
+        return team_info
+    
+    # Get team name and link
+    name_span = block_team.find("span", class_="name")
+    if name_span:
+        team_a = name_span.find("a")
+        if team_a:
+            team_info["name"] = team_a.text.strip()
+            team_link = team_a.get("href", "")
+            team_classes = team_a.get("class", [])
+            
+            # Check if it's a self-link first
+            if "mw-selflink" in team_classes or "selflink" in team_classes:
+                # Self-link means this is the current team's page
+                team_info["abbrev"] = team_info["name"]
+                print(f"  Detected self-link (current team)")
+            elif team_link:
+                team_info["link"] = team_link
+                # Handle different URL formats
+                if "/counterstrike/" in team_link and "index.php" not in team_link:
+                    # Normal link: /counterstrike/TeamName
+                    team_info["abbrev"] = team_link.split("/counterstrike/")[-1]
+                elif "title=" in team_link:
+                    # Redlink format: /index.php?title=Phoenix_(American_team)&action=edit
+                    params = urllib.parse.parse_qs(urllib.parse.urlparse(team_link).query)
+                    if 'title' in params:
+                        title = params['title'][0]
+                        # Remove namespace if present
+                        if ':' in title:
+                            team_info["abbrev"] = title.split(':')[-1]
+                        else:
+                            team_info["abbrev"] = title
+                        print(f"  Extracted from title param: {team_info['abbrev']}")
+                else:
+                    team_info["abbrev"] = team_info["name"]
+            else:
+                # No href attribute - fallback to name
+                team_info["abbrev"] = team_info["name"]
+    
+    # Get team logo
+    team_img = block_team.find("img")
+    if team_img:
+        team_info["icon_url"] = team_img.get("src", "")
+    
+    return team_info
+
+
+def determine_team_and_opponent(team_1_info: dict, team_2_info: dict, 
+                                 team_name: str, team_1_score=None, team_2_score=None) -> tuple:
+    """
+    Determine which team is the user's team and which is the opponent.
+    
+    Args:
+        team_1_info: Dict with keys: name, abbrev, link, icon_url
+        team_2_info: Dict with keys: name, abbrev, link, icon_url
+        team_name: The team abbreviation we're tracking
+        team_1_score: Optional score for team 1
+        team_2_score: Optional score for team 2
+        
+    Returns:
+        tuple: (team_dict, opponent_dict) with full structure including scores
+    """
+    if team_1_info["abbrev"] == team_name:
+        team = {
+            "abbrev": team_1_info["abbrev"],
+            "name": team_1_info["name"],
+            "link": f"https://liquipedia.net/counterstrike/{team_name}",
+            "logo": build_liquipedia_url(team_1_info["icon_url"]),
+            "score": team_1_score,
+        }
+        opponent = {
+            "abbrev": team_2_info["abbrev"],
+            "name": team_2_info["name"],
+            "link": build_liquipedia_url(team_2_info["link"]),
+            "logo": build_liquipedia_url(team_2_info["icon_url"]),
+            "score": team_2_score,
+        }
+    else:
+        team = {
+            "abbrev": team_2_info["abbrev"],
+            "name": team_2_info["name"],
+            "link": f"https://liquipedia.net/counterstrike/{team_name}",
+            "logo": build_liquipedia_url(team_2_info["icon_url"]),
+            "score": team_2_score,
+        }
+        opponent = {
+            "abbrev": team_1_info["abbrev"],
+            "name": team_1_info["name"],
+            "link": build_liquipedia_url(team_1_info["link"]),
+            "logo": build_liquipedia_url(team_1_info["icon_url"]),
+            "score": team_1_score,
+        }
+    
+    return team, opponent
+
+
+def print_match_results(result: dict):
+    """
+    Print formatted match results to the console.
+    
+    Args:
+        result: Match data dict with team, opponent, tournament, next_match, etc.
+    """
+    print(f"\n{'='*60}")
+    print("MATCH DATA EXTRACTED SUCCESSFULLY")
+    print(f"{'='*60}\n")
+    
+    print(f"🎮 Match Status: {result['match_status']}")
+    print(f"📅 Match Time: {result['next_match']['start_time']}")
+    
+    # Use arrow for human-readable time
+    kickoff_in = arrow.get(int(result['timestamp_string'])).humanize()
+    clock = arrow.get(int(result['timestamp_string'])).to('local').format('h:mm A')
+    print(f"   {kickoff_in} at {clock}")
+    print()
+    
+    print(f"🏠 Your Team:")
+    print(f"   Name: {result['team']['name']}")
+    print(f"   Abbrev: {result['team']['abbrev']}")
+    print(f"   Link: {result['team']['link']}")
+    print(f"   Logo: {result['team']['logo']}")
+    if result['team']['score'] is not None:
+        print(f"   Score: {result['team']['score']}")
+    print()
+    
+    print(f"🆚 Opponent:")
+    print(f"   Name: {result['opponent']['name']}")
+    print(f"   Abbrev: {result['opponent']['abbrev']}")
+    print(f"   Link: {result['opponent']['link']}")
+    print(f"   Logo: {result['opponent']['logo']}")
+    if result['opponent']['score'] is not None:
+        print(f"   Score: {result['opponent']['score']}")
+    print()
+    
+    print(f"🏆 Tournament:")
+    print(f"   Name: {result['tournament']['name']}")
+    print(f"   Link: {result['tournament']['link']}")
+    print()
+
+
 async def process_match(team_link, team_name, show_score=True):
     """
     Process a single match and extract all relevant data.
@@ -239,7 +416,6 @@ async def process_match(team_link, team_name, show_score=True):
     
     next_match = {
         "start_time": match_timestamp,
-        "view_links": livestream_list,
     }
 
     # Adjust match status (IN looks ugly, so show as PRE)
@@ -313,57 +489,10 @@ async def process_team_page_match(match_container, team_name, show_score=True):
         return None
 
     # Process first team (row 0)
-    team_1_name = "Unknown"
-    team_1_abbrev = "Unknown"
-    team_1_link = ""
-    team_1_icon_url = ""
     team_1_score = None
-    
     team_1_identity = opponent_rows[0].find("div", class_="match-info-opponent-identity")
-    if team_1_identity:
-        block_team = team_1_identity.find("div", class_="block-team")
-        if block_team:
-            # Get team name
-            name_span = block_team.find("span", class_="name")
-            if name_span:
-                team_a = name_span.find("a")
-                if team_a:
-                    team_1_name = team_a.text.strip()
-                    team_1_link = team_a.get("href", "")
-                    team_1_classes = team_a.get("class", [])
-                    
-                    # Check if it's a self-link first
-                    if "mw-selflink" in team_1_classes or "selflink" in team_1_classes:
-                        # Self-link means this is the current team's page - use team_name
-                        team_1_abbrev = team_1_name
-                        print(f"  Team 1 is self-link (current team)")
-                    elif team_1_link:
-                        # Handle different URL formats
-                        if "/counterstrike/" in team_1_link and "index.php" not in team_1_link:
-                            # Normal link: /counterstrike/TeamName
-                            team_1_abbrev = team_1_link.split("/counterstrike/")[-1]
-                        elif "title=" in team_1_link:
-                            # Redlink format: /index.php?title=Phoenix_(American_team)&action=edit
-                            import urllib.parse
-                            params = urllib.parse.parse_qs(urllib.parse.urlparse(team_1_link).query)
-                            if 'title' in params:
-                                title = params['title'][0]
-                                # Remove namespace if present
-                                if ':' in title:
-                                    team_1_abbrev = title.split(':')[-1]
-                                else:
-                                    team_1_abbrev = title
-                                print(f"  Team 1 extracted from title param: {team_1_abbrev}")
-                        else:
-                            team_1_abbrev = team_1_name
-                    else:
-                        # No href attribute - fallback to name
-                        team_1_abbrev = team_1_name
-            
-            # Get team logo - look for any img in block-team
-            team_img = block_team.find("img")
-            if team_img:
-                team_1_icon_url = team_img.get("src", "")
+    block_team_1 = team_1_identity.find("div", class_="block-team") if team_1_identity else None
+    team_1_info = extract_team_info_from_block(block_team_1, team_name)
     
     # Get score if present
     if show_score:
@@ -372,57 +501,10 @@ async def process_team_page_match(match_container, team_name, show_score=True):
             team_1_score = score_span.text.strip()
 
     # Process second team (row 1)
-    team_2_name = "Unknown"
-    team_2_abbrev = "Unknown"
-    team_2_link = ""
-    team_2_icon_url = ""
     team_2_score = None
-    
     team_2_identity = opponent_rows[1].find("div", class_="match-info-opponent-identity")
-    if team_2_identity:
-        block_team = team_2_identity.find("div", class_="block-team")
-        if block_team:
-            # Get team name
-            name_span = block_team.find("span", class_="name")
-            if name_span:
-                team_a = name_span.find("a")
-                if team_a:
-                    team_2_name = team_a.text.strip()
-                    team_2_link = team_a.get("href", "")
-                    team_2_classes = team_a.get("class", [])
-                    
-                    # Check if it's a self-link first
-                    if "mw-selflink" in team_2_classes or "selflink" in team_2_classes:
-                        # Self-link means this is the current team's page - use team_name
-                        team_2_abbrev = team_2_name
-                        print(f"  Team 2 is self-link (current team)")
-                    elif team_2_link:
-                        # Handle different URL formats
-                        if "/counterstrike/" in team_2_link and "index.php" not in team_2_link:
-                            # Normal link: /counterstrike/TeamName
-                            team_2_abbrev = team_2_link.split("/counterstrike/")[-1]
-                        elif "title=" in team_2_link:
-                            # Redlink format: /index.php?title=Phoenix_(American_team)&action=edit
-                            import urllib.parse
-                            params = urllib.parse.parse_qs(urllib.parse.urlparse(team_2_link).query)
-                            if 'title' in params:
-                                title = params['title'][0]
-                                # Remove namespace if present
-                                if ':' in title:
-                                    team_2_abbrev = title.split(':')[-1]
-                                else:
-                                    team_2_abbrev = title
-                                print(f"  Team 2 extracted from title param: {team_2_abbrev}")
-                        else:
-                            team_2_abbrev = team_2_name
-                    else:
-                        # No href attribute - fallback to name
-                        team_2_abbrev = team_2_name
-            
-            # Get team logo
-            team_img = block_team.find("img")
-            if team_img:
-                team_2_icon_url = team_img.get("src", "")
+    block_team_2 = team_2_identity.find("div", class_="block-team") if team_2_identity else None
+    team_2_info = extract_team_info_from_block(block_team_2, team_name)
     
     # Get score if present
     if show_score:
@@ -430,40 +512,13 @@ async def process_team_page_match(match_container, team_name, show_score=True):
         if score_span and score_span.text.strip():
             team_2_score = score_span.text.strip()
 
-    print(f"✓ Team 1: {team_1_name} ({team_1_abbrev})")
-    print(f"✓ Team 2: {team_2_name} ({team_2_abbrev})")
+    print(f"✓ Team 1: {team_1_info['name']} ({team_1_info['abbrev']})")
+    print(f"✓ Team 2: {team_2_info['name']} ({team_2_info['abbrev']})")
 
     # Determine which team is ours and which is opponent
-    if team_1_abbrev == team_name:
-        team = {
-            "abbrev": team_1_abbrev,
-            "name": team_1_name,
-            "link": "https://liquipedia.net/counterstrike/" + team_name,
-            "logo": "https://liquipedia.net" + team_1_icon_url if team_1_icon_url else "",
-            "score": team_1_score,
-        }
-        opponent = {
-            "abbrev": team_2_abbrev,
-            "name": team_2_name,
-            "link": "https://liquipedia.net" + team_2_link if team_2_link else "",
-            "logo": "https://liquipedia.net" + team_2_icon_url if team_2_icon_url else "",
-            "score": team_2_score,
-        }
-    else:
-        team = {
-            "abbrev": team_2_abbrev,
-            "name": team_2_name,
-            "link": "https://liquipedia.net/counterstrike/" + team_name,
-            "logo": "https://liquipedia.net" + team_2_icon_url if team_2_icon_url else "",
-            "score": team_2_score,
-        }
-        opponent = {
-            "abbrev": team_1_abbrev,
-            "name": team_1_name,
-            "link": "https://liquipedia.net" + team_1_link if team_1_link else "",
-            "logo": "https://liquipedia.net" + team_1_icon_url if team_1_icon_url else "",
-            "score": team_1_score,
-        }
+    team, opponent = determine_team_and_opponent(
+        team_1_info, team_2_info, team_name, team_1_score, team_2_score
+    )
 
     tournament = {
         "name": tournament_name,
@@ -721,21 +776,42 @@ async def scrape_team_match(team_name: str, match_type: str = "upcoming"):
         
         print("✓ Found carousel content")
         
-        # Get the first carousel item
-        carousel_item = carousel_content.find("div", class_="carousel-item")
-        if not carousel_item:
+        # Get all carousel items and find the first future match
+        carousel_items = carousel_content.find_all("div", class_="carousel-item")
+        if not carousel_items:
             print("❌ No carousel items found - team may not have upcoming matches")
             return None
         
-        print("✓ Found first carousel item (match)")
+        print(f"✓ Found {len(carousel_items)} carousel item(s)")
         
-        # Get the match-info-vertical div
-        match_container = carousel_item.find("div", class_="match-info--vertical")
+        # Find the first match that is in the future
+        match_container = None
+        current_time = datetime.now()
+        
+        for idx, carousel_item in enumerate(carousel_items):
+            # Get the match-info-vertical div
+            temp_container = carousel_item.find("div", class_="match-info--vertical")
+            if not temp_container:
+                continue
+            
+            # Check the timestamp
+            timer_span = temp_container.find("span", class_="timer-object")
+            if timer_span:
+                match_timestamp_string = timer_span.get("data-timestamp", "").strip()
+                if match_timestamp_string:
+                    match_timestamp = datetime.fromtimestamp(int(match_timestamp_string))
+                    if match_timestamp > current_time:
+                        print(f"✓ Found future match at carousel index {idx} (starts {match_timestamp})")
+                        match_container = temp_container
+                        break
+                    else:
+                        print(f"  Skipping past match at index {idx} (started {match_timestamp})")
+        
         if not match_container:
-            print("❌ Could not find match-info--vertical div")
+            print("❌ No future matches found in carousel - all matches are in the past")
             return None
         
-        print("✓ Found match-info--vertical container")
+        print("✓ Found match-info--vertical container for future match")
         
         try:
             result = await process_team_page_match(match_container, team_name)
@@ -744,41 +820,7 @@ async def scrape_team_match(team_name: str, match_type: str = "upcoming"):
                 return None
             
             # Print formatted results
-            print(f"\n{'='*60}")
-            print("MATCH DATA EXTRACTED SUCCESSFULLY")
-            print(f"{'='*60}\n")
-            
-            print(f"🎮 Match Status: {result['match_status']}")
-            print(f"📅 Match Time: {result['next_match']['start_time']}")
-            
-            # Use arrow for human-readable time
-            kickoff_in = arrow.get(int(result['timestamp_string'])).humanize()
-            clock = arrow.get(int(result['timestamp_string'])).to('local').format('h:mm A')
-            print(f"   {kickoff_in} at {clock}")
-            print()
-            
-            print(f"🏠 Your Team:")
-            print(f"   Name: {result['team']['name']}")
-            print(f"   Abbrev: {result['team']['abbrev']}")
-            print(f"   Link: {result['team']['link']}")
-            print(f"   Logo: {result['team']['logo']}")
-            if result['team']['score'] is not None:
-                print(f"   Score: {result['team']['score']}")
-            print()
-            
-            print(f"🆚 Opponent:")
-            print(f"   Name: {result['opponent']['name']}")
-            print(f"   Abbrev: {result['opponent']['abbrev']}")
-            print(f"   Link: {result['opponent']['link']}")
-            print(f"   Logo: {result['opponent']['logo']}")
-            if result['opponent']['score'] is not None:
-                print(f"   Score: {result['opponent']['score']}")
-            print()
-            
-            print(f"🏆 Tournament:")
-            print(f"   Name: {result['tournament']['name']}")
-            print(f"   Link: {result['tournament']['link']}")
-            print()
+            print_match_results(result)
             
             return result
             
@@ -801,41 +843,7 @@ async def scrape_team_match(team_name: str, match_type: str = "upcoming"):
                 return None
             
             # Print formatted results
-            print(f"\n{'='*60}")
-            print("MATCH DATA EXTRACTED SUCCESSFULLY")
-            print(f"{'='*60}\n")
-            
-            print(f"🎮 Match Status: {result['match_status']}")
-            print(f"📅 Match Time: {result['next_match']['start_time']}")
-            
-            # Use arrow for human-readable time
-            kickoff_in = arrow.get(int(result['timestamp_string'])).humanize()
-            clock = arrow.get(int(result['timestamp_string'])).to('local').format('h:mm A')
-            print(f"   {kickoff_in} at {clock}")
-            print()
-            
-            print(f"🏠 Your Team:")
-            print(f"   Name: {result['team']['name']}")
-            print(f"   Abbrev: {result['team']['abbrev']}")
-            print(f"   Link: {result['team']['link']}")
-            print(f"   Logo: {result['team']['logo']}")
-            if result['team']['score'] is not None:
-                print(f"   Score: {result['team']['score']}")
-            print()
-            
-            print(f"🆚 Opponent:")
-            print(f"   Name: {result['opponent']['name']}")
-            print(f"   Abbrev: {result['opponent']['abbrev']}")
-            print(f"   Link: {result['opponent']['link']}")
-            print(f"   Logo: {result['opponent']['logo']}")
-            if result['opponent']['score'] is not None:
-                print(f"   Score: {result['opponent']['score']}")
-            print()
-            
-            print(f"🏆 Tournament:")
-            print(f"   Name: {result['tournament']['name']}")
-            print(f"   Link: {result['tournament']['link']}")
-            print()
+            print_match_results(result)
             
             return result
             
