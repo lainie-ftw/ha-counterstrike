@@ -533,18 +533,30 @@ class CounterstrikeEntity(Entity):
             # Find the carousel container
             carousel_container = soup.find("div", attrs={"data-switch-group-container": "countdown"})
             if not carousel_container:
-                _LOGGER.error("Could not find carousel container")
+                _LOGGER.info("Could not find carousel container for team %s", self._team_name)
+                self._state = "NOT_FOUND"
+                self._extra_state_attributes = {
+                    "last_update": datetime.now(),
+                }
                 return
 
             # Navigate to carousel content
             carousel = carousel_container.find("div", class_="carousel")
             if not carousel:
-                _LOGGER.error("Could not find carousel element")
+                _LOGGER.info("Could not find carousel element for team %s", self._team_name)
+                self._state = "NOT_FOUND"
+                self._extra_state_attributes = {
+                    "last_update": datetime.now(),
+                }
                 return
 
             carousel_content = carousel.find("div", class_="carousel-content")
             if not carousel_content:
-                _LOGGER.error("Could not find carousel content")
+                _LOGGER.info("Could not find carousel content for team %s", self._team_name)
+                self._state = "NOT_FOUND"
+                self._extra_state_attributes = {
+                    "last_update": datetime.now(),
+                }
                 return
 
             # Get all carousel items and find the first future match
@@ -574,7 +586,11 @@ class CounterstrikeEntity(Entity):
                 result = await self.process_team_page_match(match_container)
 
             except Exception as e:
-                _LOGGER.exception(f"Error parsing matches page match data: {e}")
+                _LOGGER.info(f"Error parsing matches page match data: {e}")
+                self._state = "NOT_FOUND"
+                self._extra_state_attributes = {
+                    "last_update": datetime.now(),
+                }
 
         else:
             # For completed matches, use the team's /Matches page
@@ -585,7 +601,11 @@ class CounterstrikeEntity(Entity):
                 result = await self.process_matches_page_match(soup)
 
             except Exception as e:
-                _LOGGER.exception(f"Error parsing matches page match data: {e}")
+                _LOGGER.info(f"Error parsing matches page match data: {e}")
+                self._state = "NOT_FOUND"
+                self._extra_state_attributes = {
+                    "last_update": datetime.now(),
+                }
 
         if result is None:
             self._state = "NOT_FOUND"
