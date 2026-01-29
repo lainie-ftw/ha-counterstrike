@@ -583,7 +583,13 @@ class CounterstrikeEntity(Entity):
                             break
 
             try:
-                result = await self.process_team_page_match(match_container)
+                if match_container is not None: # This can happen if only 1 match is present on a team page but it's in the past.
+                    result = await self.process_team_page_match(match_container)
+                else:
+                    self._state = "NOT_FOUND"
+                    self._extra_state_attributes = {
+                        "last_update": datetime.now(),
+                    }
 
             except Exception as e:
                 _LOGGER.info(f"Error parsing matches page match data: {e}")
