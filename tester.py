@@ -20,6 +20,7 @@ from datetime import datetime
 
 import aiohttp
 import arrow
+import requests
 from bs4 import BeautifulSoup
 
 
@@ -431,118 +432,6 @@ async def process_match(team_link, team_name, show_score=True):
         "timestamp_string": match_timestamp_string,
     }
 
-
-async def process_team_page_match(match_container, team_name, show_score=True):
-    """
-    Process a match from the team page's Upcoming Matches carousel.
-    Uses the vertical match-info structure from team pages.
-    
-    Args:
-        match_container: BeautifulSoup element for the match-info-vertical div
-        team_name: Name of the team we're searching for
-        show_score: Whether to extract score information
-        
-    Returns:
-        dict: All extracted match data
-    """
-    print(f"✓ Processing team page match for {team_name}")
-    
-    # Match timestamp
-    timer_span = match_container.find("span", class_="timer-object")
-    if timer_span is None:
-        print("❌ Could not find timer-object span")
-        return None
-        
-    match_timestamp_string = timer_span.get("data-timestamp", "").strip()
-    if not match_timestamp_string:
-        print("❌ Could not find data-timestamp attribute")
-        return None
-        
-    match_timestamp = datetime.fromtimestamp(int(match_timestamp_string))
-    print(f"✓ Match timestamp: {match_timestamp}")
-
-    # Tournament info
-    tournament_section = match_container.find("div", class_="match-info-tournament")
-    tournament_name = "Unknown"
-    tournament_link = ""
-    
-    if tournament_section:
-        tournament_name_section = tournament_section.find("span", class_="match-info-tournament-name")
-        if tournament_name_section:
-            tournament_a = tournament_name_section.find("a")
-            if tournament_a:
-                tournament_name = tournament_a.get("title", "Unknown").strip()
-                tournament_link = tournament_a.get("href", "").strip()
-    
-    print(f"✓ Tournament: {tournament_name}")
-
-    # Get teams from match-info-header-vertical
-    match_info_header = match_container.find("div", class_="match-info-header-vertical")
-    if not match_info_header:
-        print("❌ Could not find match-info-header-vertical")
-        return None
-
-    # Find all opponent rows
-    opponent_rows = match_info_header.find_all("div", class_="match-info-opponent-row")
-    if len(opponent_rows) < 2:
-        print(f"❌ Expected 2 opponent rows, found {len(opponent_rows)}")
-        return None
-
-    # Process first team (row 0)
-    team_1_score = None
-    team_1_identity = opponent_rows[0].find("div", class_="match-info-opponent-identity")
-    block_team_1 = team_1_identity.find("div", class_="block-team") if team_1_identity else None
-    team_1_info = extract_team_info_from_block(block_team_1, team_name)
-    
-    # Get score if present
-    if show_score:
-        score_span = opponent_rows[0].find("span", class_="match-info-opponent-score")
-        if score_span and score_span.text.strip():
-            team_1_score = score_span.text.strip()
-
-    # Process second team (row 1)
-    team_2_score = None
-    team_2_identity = opponent_rows[1].find("div", class_="match-info-opponent-identity")
-    block_team_2 = team_2_identity.find("div", class_="block-team") if team_2_identity else None
-    team_2_info = extract_team_info_from_block(block_team_2, team_name)
-    
-    # Get score if present
-    if show_score:
-        score_span = opponent_rows[1].find("span", class_="match-info-opponent-score")
-        if score_span and score_span.text.strip():
-            team_2_score = score_span.text.strip()
-
-    print(f"✓ Team 1: {team_1_info['name']} ({team_1_info['abbrev']})")
-    print(f"✓ Team 2: {team_2_info['name']} ({team_2_info['abbrev']})")
-
-    # Determine which team is ours and which is opponent
-    team, opponent = determine_team_and_opponent(
-        team_1_info, team_2_info, team_name, team_1_score, team_2_score
-    )
-
-    tournament = {
-        "name": tournament_name,
-        "link": "https://liquipedia.net" + tournament_link if tournament_link else "",
-    }
-    
-    next_match = {
-        "start_time": match_timestamp,
-        "view_links": [],  # TODO: Implement stream finding for team page
-    }
-
-    # Team page upcoming matches are always PRE status
-    match_status = "PRE"
-
-    return {
-        "team": team,
-        "opponent": opponent,
-        "tournament": tournament,
-        "next_match": next_match,
-        "match_status": match_status,
-        "timestamp_string": match_timestamp_string,
-    }
-
-
 async def process_matches_page_match(soup, team_name):
     """
     Process the most recent completed match from the team's /Matches page.
@@ -750,82 +639,181 @@ async def scrape_team_match(team_name: str, match_type: str = "upcoming"):
     
     # Use different sources based on match type
     if match_type == "upcoming":
-        # For upcoming matches, use the team page
-        team_url = f"https://liquipedia.net/counterstrike/{team_name}"
-        print(f"✓ Using team page: {team_url}")
-        soup = await get_soup_object(team_url)
+        # For upcoming matches, use PandaScore API
+        api_url = f"https://api.pandascore.co/teams/{team_name}/matches"
+        params = {
+            "videogame_title": "cs-2",
+            "filter[status]": "not_started"
+        }
         
-        # Find the carousel container
-        carousel_container = soup.find("div", attrs={"data-switch-group-container": "countdown"})
-        if not carousel_container:
-            print("❌ Could not find countdown carousel container")
-            return None
+        # TODO: API key should be added here - will be configured later
+        headers = {
+            "accept": "application/json",
+            "authorization": "Bearer [APIKEY]"  # Placeholder for API key
+        }
         
-        print("✓ Found carousel container")
-        
-        # Navigate to carousel content
-        carousel = carousel_container.find("div", class_="carousel")
-        if not carousel:
-            print("❌ Could not find carousel div")
-            return None
-        
-        carousel_content = carousel.find("div", class_="carousel-content")
-        if not carousel_content:
-            print("❌ Could not find carousel-content div")
-            return None
-        
-        print("✓ Found carousel content")
-        
-        # Get all carousel items and find the first future match
-        carousel_items = carousel_content.find_all("div", class_="carousel-item")
-        if not carousel_items:
-            print("❌ No carousel items found - team may not have upcoming matches")
-            return None
-        
-        print(f"✓ Found {len(carousel_items)} carousel item(s)")
-        
-        # Find the first match that is in the future
-        match_container = None
-        current_time = datetime.now()
-        
-        for idx, carousel_item in enumerate(carousel_items):
-            # Get the match-info-vertical div
-            temp_container = carousel_item.find("div", class_="match-info--vertical")
-            if not temp_container:
-                continue
-            
-            # Check the timestamp
-            timer_span = temp_container.find("span", class_="timer-object")
-            if timer_span:
-                match_timestamp_string = timer_span.get("data-timestamp", "").strip()
-                if match_timestamp_string:
-                    match_timestamp = datetime.fromtimestamp(int(match_timestamp_string))
-                    if match_timestamp > current_time:
-                        print(f"✓ Found future match at carousel index {idx} (starts {match_timestamp})")
-                        match_container = temp_container
-                        break
-                    else:
-                        print(f"  Skipping past match at index {idx} (started {match_timestamp})")
-        
-        if not match_container:
-            print("❌ No future matches found in carousel - all matches are in the past")
-            return None
-        
-        print("✓ Found match-info--vertical container for future match")
+        print(f"✓ Using PandaScore API: {api_url}")
+        print(f"✓ Parameters: {params}")
         
         try:
-            result = await process_team_page_match(match_container, team_name)
+            # Make API request
+            response = requests.get(api_url, params=params, headers=headers)
             
-            if result is None:
+            # Check if request was successful
+            if response.status_code != 200:
+                print(f"❌ API request failed with status code: {response.status_code}")
+                print(f"   Response: {response.text}")
                 return None
+            
+            # Parse JSON response
+            matches = response.json()
+            
+            if not matches or len(matches) == 0:
+                print("❌ No upcoming matches found for this team")
+                return None
+            
+            print(f"✓ Found {len(matches)} upcoming match(es)")
+            
+            # Get the first upcoming match
+            match_data = matches[0]
+            
+            print(f"✓ Processing first upcoming match")
+            
+            # Extract match timestamp
+            scheduled_at = match_data.get("scheduled_at") or match_data.get("begin_at")
+            if not scheduled_at:
+                print("❌ No scheduled_at or begin_at field in match data")
+                return None
+            
+            # Parse ISO 8601 timestamp to datetime
+            from dateutil import parser as date_parser
+            match_timestamp = date_parser.isoparse(scheduled_at)
+            match_timestamp_string = str(int(match_timestamp.timestamp()))
+            
+            print(f"✓ Match timestamp: {match_timestamp}")
+            
+            # Extract opponents
+            opponents = match_data.get("opponents", [])
+            
+            # Handle case where opponents array is empty (TBD teams)
+            if len(opponents) == 0:
+                print("⚠️  No opponents listed - teams are TBD")
+                
+                # Try to parse team names from match name if available
+                match_name = match_data.get("name", "")
+                
+                # Extract team info with placeholder
+                team = {
+                    "abbrev": team_name,
+                    "name": team_name.replace("_", " ").replace("-", " "),
+                    "link": f"https://liquipedia.net/counterstrike/{team_name}",
+                    "logo": "",
+                    "score": None,
+                }
+                
+                # Opponent is TBD
+                opponent = {
+                    "abbrev": "TBD",
+                    "name": "TBD",
+                    "link": "",
+                    "logo": "",
+                    "score": None,
+                }
+                
+                print(f"✓ Our team: {team['name']} ({team['abbrev']})")
+                print(f"✓ Opponent: TBD (to be determined)")
+            
+            elif len(opponents) < 2:
+                print(f"❌ Expected 2 opponents, found {len(opponents)}")
+                return None
+            
+            else:
+                # Determine which opponent is our team
+                team_data = None
+                opponent_data = None
+                
+                for opp in opponents:
+                    opp_info = opp.get("opponent", {})
+                    opp_slug = opp_info.get("slug", "")
+                    
+                    # Try to match by slug
+                    if opp_slug == team_name or opp_slug.replace("-", "_") == team_name:
+                        team_data = opp_info
+                    else:
+                        opponent_data = opp_info
+                
+                # If we couldn't match by slug, just use the first two opponents
+                if not team_data or not opponent_data:
+                    team_data = opponents[0].get("opponent", {})
+                    opponent_data = opponents[1].get("opponent", {})
+                
+                # Extract team info
+                team = {
+                    "abbrev": team_data.get("slug", team_data.get("acronym", team_name)),
+                    "name": team_data.get("name", "Unknown"),
+                    "link": f"https://liquipedia.net/counterstrike/{team_name}",
+                    "logo": team_data.get("image_url", ""),
+                    "score": None,
+                }
+                
+                # Extract opponent info
+                opponent_slug = opponent_data.get("slug", opponent_data.get("acronym", ""))
+                opponent = {
+                    "abbrev": opponent_slug,
+                    "name": opponent_data.get("name", "Unknown"),
+                    "link": f"https://liquipedia.net/counterstrike/{opponent_slug}" if opponent_slug else "",
+                    "logo": opponent_data.get("image_url", ""),
+                    "score": None,
+                }
+                
+                print(f"✓ Our team: {team['name']} ({team['abbrev']})")
+                print(f"✓ Opponent: {opponent['name']} ({opponent['abbrev']})")
+            
+            # Extract tournament info
+            tournament_data = match_data.get("tournament", {})
+            league_data = match_data.get("league", {})
+            serie_data = match_data.get("serie", {})
+            
+            tournament_name = (
+                serie_data.get("full_name") or 
+                serie_data.get("name") or 
+                tournament_data.get("name") or 
+                league_data.get("name") or 
+                "Unknown"
+            )
+            
+            tournament = {
+                "name": tournament_name,
+                "link": tournament_data.get("url", ""),
+            }
+            
+            print(f"✓ Tournament: {tournament_name}")
+            
+            next_match = {
+                "start_time": match_timestamp,
+            }
+            
+            result = {
+                "team": team,
+                "opponent": opponent,
+                "tournament": tournament,
+                "next_match": next_match,
+                "match_status": "PRE",
+                "timestamp_string": match_timestamp_string,
+            }
             
             # Print formatted results
             print_match_results(result)
             
             return result
             
+        except requests.exceptions.RequestException as e:
+            print(f"\n❌ Error making API request: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
         except Exception as e:
-            print(f"\n❌ Error parsing team page match data: {e}")
+            print(f"\n❌ Error parsing API response: {e}")
             import traceback
             traceback.print_exc()
             return None
