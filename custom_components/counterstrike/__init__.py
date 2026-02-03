@@ -1,10 +1,10 @@
 import asyncio
 from datetime import datetime, timedelta
 import logging
-import re
 
 import aiohttp
-from bs4 import BeautifulSoup
+from dateutil import parser as date_parser
+
 import arrow
 
 from homeassistant.core import HomeAssistant
@@ -22,152 +22,13 @@ CONF_COUNTERSTRIKE = "counterstrike"
 
 SCAN_INTERVAL = timedelta(seconds=3600)
 
+PANDASCORE_API_KEY = ""
+
 # Data in attributes:
 # team: abbrev, name, link, logo
 # opponent: abbrev, name, link, logo
 # tournament: name, link
 # match: start time, view link
-
-#LIQUIPEDIA = "https://liquipedia.net/counterstrike/Liquipedia:Matches"
-
-
-async def get_soup_object(link) -> BeautifulSoup:
-    async with aiohttp.ClientSession() as session, session.get(link) as response:
-        html = await response.text()
-        return BeautifulSoup(html, "html.parser")
-
-def build_liquipedia_url(path: str) -> str:
-    """
-    Build a full Liquipedia URL from a relative path.
-
-    Args:
-        path: Relative path (e.g., "/counterstrike/Team_Name")
-
-    Returns:
-        str: Full URL or empty string if path is empty
-    """
-    if not path:
-        return ""
-    return "https://liquipedia.net" + path
-
-
-def extract_team_info_from_block(block_team, team_name: str) -> dict:
-    """
-    Extract team information from a block-team div element.
-    Handles various URL formats including self-links and redlinks.
-
-    Args:
-        block_team: BeautifulSoup element with class "block-team"
-        team_name: Name of the team we're tracking (for self-link detection)
-
-    Returns:
-        dict: Team info with keys: name, abbrev, link, icon_url
-    """
-    import urllib.parse
-
-    team_info = {
-        "name": "Unknown",
-        "abbrev": "Unknown",
-        "link": "",
-        "icon_url": "",
-    }
-
-    if not block_team:
-        return team_info
-
-    # Get team name and link
-    name_span = block_team.find("span", class_="name")
-    if name_span:
-        team_a = name_span.find("a")
-        if team_a:
-            team_info["name"] = team_a.text.strip()
-            team_link = team_a.get("href", "")
-            team_classes = team_a.get("class", [])
-
-            # Check if it's a self-link first
-            if "mw-selflink" in team_classes or "selflink" in team_classes:
-                # Self-link means this is the current team's page
-                team_info["abbrev"] = team_info["name"]
-                print(f"  Detected self-link (current team)")
-            elif team_link:
-                team_info["link"] = team_link
-                # Handle different URL formats
-                if "/counterstrike/" in team_link and "index.php" not in team_link:
-                    # Normal link: /counterstrike/TeamName
-                    team_info["abbrev"] = team_link.split("/counterstrike/")[-1]
-                elif "title=" in team_link:
-                    # Redlink format: /index.php?title=Phoenix_(American_team)&action=edit
-                    params = urllib.parse.parse_qs(urllib.parse.urlparse(team_link).query)
-                    if 'title' in params:
-                        title = params['title'][0]
-                        # Remove namespace if present
-                        if ':' in title:
-                            team_info["abbrev"] = title.split(':')[-1]
-                        else:
-                            team_info["abbrev"] = title
-                        print(f"  Extracted from title param: {team_info['abbrev']}")
-                else:
-                    team_info["abbrev"] = team_info["name"]
-            else:
-                # No href attribute - fallback to name
-                team_info["abbrev"] = team_info["name"]
-
-    # Get team logo
-    team_img = block_team.find("img")
-    if team_img:
-        team_info["icon_url"] = team_img.get("src", "")
-
-    return team_info
-
-
-def determine_team_and_opponent(team_1_info: dict, team_2_info: dict,
-                                 team_name: str, team_1_score=None, team_2_score=None) -> tuple:
-    """
-    Determine which team is the user's team and which is the opponent.
-
-    Args:
-        team_1_info: Dict with keys: name, abbrev, link, icon_url
-        team_2_info: Dict with keys: name, abbrev, link, icon_url
-        team_name: The team abbreviation we're tracking
-        team_1_score: Optional score for team 1
-        team_2_score: Optional score for team 2
-
-    Returns:
-        tuple: (team_dict, opponent_dict) with full structure including scores
-    """
-    if team_1_info["abbrev"] == team_name:
-        team = {
-            "abbrev": team_1_info["abbrev"],
-            "name": team_1_info["name"],
-            "link": f"https://liquipedia.net/counterstrike/{team_name}",
-            "logo": build_liquipedia_url(team_1_info["icon_url"]),
-            "score": team_1_score,
-        }
-        opponent = {
-            "abbrev": team_2_info["abbrev"],
-            "name": team_2_info["name"],
-            "link": build_liquipedia_url(team_2_info["link"]),
-            "logo": build_liquipedia_url(team_2_info["icon_url"]),
-            "score": team_2_score,
-        }
-    else:
-        team = {
-            "abbrev": team_2_info["abbrev"],
-            "name": team_2_info["name"],
-            "link": f"https://liquipedia.net/counterstrike/{team_name}",
-            "logo": build_liquipedia_url(team_2_info["icon_url"]),
-            "score": team_2_score,
-        }
-        opponent = {
-            "abbrev": team_1_info["abbrev"],
-            "name": team_1_info["name"],
-            "link": build_liquipedia_url(team_1_info["link"]),
-            "logo": build_liquipedia_url(team_1_info["icon_url"]),
-            "score": team_1_score,
-        }
-
-    return team, opponent
-
 
 async def async_setup(hass: HomeAssistant, config: ConfigType):
     devices = []
@@ -177,8 +38,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType):
     for team_to_process in teams:
         team = team_to_process["team"]
         show_score = team_to_process["show_score"]
-        devices.append(CounterstrikeEntity(team, show_score, "upcoming", hass))
-        devices.append(CounterstrikeEntity(team, show_score, "completed", hass))
+        devices.append(CounterstrikeEntity(team, show_score, hass))
 
     # Set up component
     component = EntityComponent(_LOGGER, DOMAIN, hass)
@@ -198,8 +58,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType):
 class CounterstrikeEntity(Entity):
     _attr_should_poll = True
 
-    def __init__(self, input_team, show_score, upcoming_or_concluded, hass):
-        team_id = input_team + "_" + upcoming_or_concluded
+    def __init__(self, input_team, show_score,hass):
+        team_id = input_team
         self._unique_id = slugify(team_id)
         self._name = team_id
         self._team_name = input_team
@@ -211,271 +71,228 @@ class CounterstrikeEntity(Entity):
         self._state = "NOT_FOUND"
         self._extra_state_attributes = None
 
-        self._match_state = upcoming_or_concluded
-
         self._show_score = show_score
         self.hass = hass
 
-    async def process_team_page_match(self, match_container):
+    async def fetch_team_match(self) -> dict:
         """
-        Process a match from the team page's Upcoming Matches carousel.
-        Uses the vertical match-info structure from team pages.
-
+        Fetch the most recent match for a team using the PandaScore API.
+        
         Args:
-            match_container: BeautifulSoup element for the match-info-vertical div
-            team_name: Name of the team we're searching for
-            show_score: Whether to extract score information
-
+            team_slug: Team slug (e.g., "falcons-esports", "mousesports-cs-go")
+            
         Returns:
-            dict: All extracted match data
+            dict: Match data or None if not found
         """
-
-        # Match timestamp
-        timer_span = match_container.find("span", class_="timer-object")
-        match_timestamp_string = timer_span.get("data-timestamp", "").strip()
-        match_timestamp = datetime.fromtimestamp(int(match_timestamp_string))
-
-        # Tournament info
-        tournament_section = match_container.find("div", class_="match-info-tournament")
-        tournament_name = "Unknown"
-        tournament_link = ""
-
-        if tournament_section:
-            tournament_name_section = tournament_section.find("span", class_="match-info-tournament-name")
-            if tournament_name_section:
-                tournament_a = tournament_name_section.find("a")
-                if tournament_a:
-                    tournament_name = tournament_a.get("title", "Unknown").strip()
-                    tournament_link = tournament_a.get("href", "").strip()
-
-        # Get teams from match-info-header-vertical
-        match_info_header = match_container.find("div", class_="match-info-header-vertical")
-
-        # Find all opponent rows
-        opponent_rows = match_info_header.find_all("div", class_="match-info-opponent-row")
-
-        # Process first team (row 0)
-        team_1_score = None
-        team_1_identity = opponent_rows[0].find("div", class_="match-info-opponent-identity")
-        block_team_1 = team_1_identity.find("div", class_="block-team") if team_1_identity else None
-        team_1_info = extract_team_info_from_block(block_team_1, self._team_name)
-
-        # Get score if present
-        if self._show_score:
-            score_span = opponent_rows[0].find("span", class_="match-info-opponent-score")
-            if score_span and score_span.text.strip():
-                team_1_score = score_span.text.strip()
-
-        # Process second team (row 1)
-        team_2_score = None
-        team_2_identity = opponent_rows[1].find("div", class_="match-info-opponent-identity")
-        block_team_2 = team_2_identity.find("div", class_="block-team") if team_2_identity else None
-        team_2_info = extract_team_info_from_block(block_team_2, self._team_name)
-
-        # Get score if present
-        if self._show_score:
-            score_span = opponent_rows[1].find("span", class_="match-info-opponent-score")
-            if score_span and score_span.text.strip():
-                team_2_score = score_span.text.strip()
-
-        # Determine which team is ours and which is opponent
-        team, opponent = determine_team_and_opponent(
-            team_1_info, team_2_info, self._team_name, team_1_score, team_2_score
-        )
-
-        if team is None or opponent is None:
-            return None
-
-        tournament = {
-            "name": tournament_name,
-            "link": "https://liquipedia.net" + tournament_link if tournament_link else "",
+        # Construct API URL
+        api_url = f"https://api.pandascore.co/teams/{self.name}/matches"
+        params = {
+            "videogame_title": "cs-2",
+            "page[size]": "1"
         }
-
-        next_match = {
-            "start_time": match_timestamp,
+        
+        headers = {
+            "accept": "application/json",
+            "authorization": f"Bearer {PANDASCORE_API_KEY}"
         }
+        
+        try:
+            # Make API request
+            async with aiohttp.ClientSession() as session:
+                async with session.get(api_url, params=params, headers=headers) as response:
+                    if response.status != 200:
+                        # handle error
+                        return None
+                    matches = await response.json()
+            
+            if not matches or len(matches) == 0:
+                _LOGGER.info("no matches found")
+                return None
+            
+            # Get the first match (most recent)
+            match_data = matches[0]
+            
+            # Extract match timestamp
+            scheduled_at = match_data.get("scheduled_at") or match_data.get("begin_at")
+            if not scheduled_at:
+                return None
+            
+            _LOGGER.info("made it past the API call and the scheduled_at time")
 
-        # Team page upcoming matches are always PRE status
-        match_status = "PRE"
-
-        return {
-            "team": team,
-            "opponent": opponent,
-            "tournament": tournament,
-            "next_match": next_match,
-            "match_status": match_status,
-            "timestamp_string": match_timestamp_string,
-        }
-
-
-    async def process_matches_page_match(self, soup):
-        """
-        Process the most recent completed match from the team's /Matches page.
-
-        Args:
-            soup: BeautifulSoup object of the team's Matches page
-            team_name: Name of the team we're searching for
-
-        Returns:
-            dict: All extracted match data for the most recent completed match
-        """
-
-        # The matches table is typically in div.mw-parser-output
-        content = soup.find("div", class_="mw-parser-output")
-
-        # Find all match rows in the table
-        # Matches are in table rows with specific structure
-        match_rows = content.find_all("tr")
-
-        # Find the first completed match (has a score with ":")
-        for row in match_rows:
-            # Get all cells in the row
-            cells = row.find_all("td", recursive=False)
-
-            # Need at least 9 cells for a proper match row
-            # Structure: Date, Tier, Type, (empty), (empty), Tournament, Participant, Score, Opponent
-            if len(cells) < 9:
-                continue
-
-            # The score is at index 7
-            score_cell = cells[7]
-
-            # Get the score text
-            score_content = score_cell.find_all(string=True, recursive=True)
-            score_text = "".join(score_content).strip()
-
-            # Look for a real score (not "W : FF" or upcoming matches with "vs")
-            if ":" in score_text and "vs" not in score_text.lower():
-                # Check if this is a real numeric score
-                parts = score_text.split(":")
-                if len(parts) == 2:
-                    left_score = ""
-                    right_score = ""
-                    if self._show_score:
-                        left_score = parts[0].strip()
-                        right_score = parts[1].strip()
-
-                        # Skip forfeits, walkover, or dates
-                        if "FF" in left_score or "FF" in right_score or "W" in left_score:
-                            continue
-                        if "-" in left_score or "EST" in score_text or "PST" in score_text:
-                            continue
-
-                        # Try to verify these are numeric scores
-                        try:
-                            int(left_score)
-                            int(right_score)
-                        except ValueError:
-                            # Not numeric scores, skip
-                            continue
-
-                    # Cell structure: Date, Tier, Type, (empty), (empty), Tournament, Participant, Score, Opponent
-                    date_cell = cells[0]
-                    tournament_cell = cells[5]
-                    participant_cell = cells[6]
-                    score_cell = cells[7]
-                    opponent_cell = cells[8]
-
-                    # Extract date/timestamp
-                    timer_span = date_cell.find("span", class_="timer-object")
-                    match_timestamp_string = timer_span.get("data-timestamp", "").strip()
-                    match_timestamp = datetime.fromtimestamp(int(match_timestamp_string))
-
-                    # Extract tournament
-                    tournament_name = "Unknown"
-                    tournament_link = ""
-                    tournament_a = tournament_cell.find("a")
-                    if tournament_a:
-                        tournament_name = tournament_a.get("title", tournament_a.text.strip())
-                        tournament_link = tournament_a.get("href", "")
-
-                    # Extract our team info
-                    team_name_display = "Unknown"
-                    team_abbrev = self._team_name
-                    team_logo = ""
-
-                    team_img = participant_cell.find("img")
-                    if team_img:
-                        team_logo = team_img.get("src", "")
-
-                    # Try to find team name - could be in various places
-                    team_link_elem = participant_cell.find("a", href=True)
-                    if team_link_elem:
-                        team_name_display = team_link_elem.text.strip()
-
-                    # If team name is still empty, try getting all text from the cell
-                    if not team_name_display or team_name_display == "Unknown":
-                        cell_text = participant_cell.get_text(strip=True)
-                        # Remove any whitespace and extract team name
-                        if cell_text:
-                            team_name_display = cell_text
-
-                    # Last resort: use the team parameter
-                    if not team_name_display or team_name_display == "Unknown":
-                        team_name_display = self._team_name
-
-                    # Extract opponent info
-                    opponent_name = "Unknown"
-                    opponent_abbrev = "Unknown"
-                    opponent_link = ""
-                    opponent_logo = ""
-
-                    opponent_img = opponent_cell.find("img")
-                    if opponent_img:
-                        opponent_logo = opponent_img.get("src", "")
-
-                    # Try to find opponent name
-                    opponent_link_elem = opponent_cell.find("a", href=True)
-                    if opponent_link_elem:
-                        opponent_name = opponent_link_elem.text.strip()
-                        opponent_link = opponent_link_elem.get("href", "")
-                        if "/counterstrike/" in opponent_link:
-                            opponent_abbrev = opponent_link.split("/counterstrike/")[-1]
-                        else:
-                            opponent_abbrev = opponent_name
-
-                    # If opponent name is still empty, try getting all text from the cell
-                    if not opponent_name or opponent_name == "Unknown":
-                        cell_text = opponent_cell.get_text(strip=True)
-                        if cell_text:
-                            opponent_name = cell_text
-                            opponent_abbrev = cell_text
-
-                    # Build result structure
+            # Parse ISO 8601 timestamp to datetime
+            match_timestamp = date_parser.isoparse(scheduled_at)
+            match_timestamp_string = str(int(match_timestamp.timestamp()))
+            
+            # Determine match status
+            api_status = match_data.get("status", "not_started")
+            status_map = {
+                "not_started": "PRE",
+                "running": "PRE",
+                "finished": "POST"
+            }
+            match_status = status_map.get(api_status, "PRE")
+            
+            # Extract opponents
+            opponents = match_data.get("opponents", [])
+            
+            # Handle case where opponents array is empty or has less than 2 teams
+            if len(opponents) < 2:
+                # Try to get at least our team
+                if len(opponents) == 1:
+                    team_data = opponents[0].get("opponent", {})
+                    
                     team = {
-                        "abbrev": team_abbrev,
-                        "name": team_name_display,
-                        "link": f"https://liquipedia.net/counterstrike/{self._team_name}",
-                        "logo": "https://liquipedia.net" + team_logo if team_logo else "",
-                        "score": left_score,
+                        "abbrev": team_data.get("slug", team_data.get("acronym", self.name)),
+                        "name": team_data.get("name", "Unknown"),
+                        "link": f"https://liquipedia.net/counterstrike/{self.name}",
+                        "logo": team_data.get("image_url", ""),
+                        "score": None,
                     }
-
+                    
+                    # Opponent is TBD
                     opponent = {
-                        "abbrev": opponent_abbrev,
-                        "name": opponent_name,
-                        "link": "https://liquipedia.net" + opponent_link if opponent_link else "",
-                        "logo": "https://liquipedia.net" + opponent_logo if opponent_logo else "",
-                        "score": right_score,
+                        "abbrev": "TBD",
+                        "name": "TBD",
+                        "link": "",
+                        "logo": "",
+                        "score": None,
                     }
-
-                    tournament = {
-                        "name": tournament_name,
-                        "link": "https://liquipedia.net" + tournament_link if tournament_link else "",
+                else:
+                    # No opponents at all
+                    team = {
+                        "abbrev": self.name,
+                        "name": self.name.replace("-", " ").replace("_", " ").title(),
+                        "link": f"https://liquipedia.net/counterstrike/{self.name}",
+                        "logo": "",
+                        "score": None,
                     }
-
-                    next_match = {
-                        "start_time": match_timestamp,
+                    
+                    opponent = {
+                        "abbrev": "TBD",
+                        "name": "TBD",
+                        "link": "",
+                        "logo": "",
+                        "score": None,
                     }
-
-                    return {
-                        "team": team,
-                        "opponent": opponent,
-                        "tournament": tournament,
-                        "next_match": next_match,
-                        "match_status": "POST",
-                        "timestamp_string": match_timestamp_string,
-                    }
-        return None
+            else:
+                # Determine which opponent is our team
+                team_data = None
+                opponent_data = None
+                
+                for opp in opponents:
+                    opp_info = opp.get("opponent", {})
+                    opp_slug = opp_info.get("slug", "")
+                    
+                    # Try to match by slug (handle both dash and underscore variations)
+                    normalized_team_slug = self.name.replace("_", "-")
+                    normalized_opp_slug = opp_slug.replace("_", "-")
+                    
+                    if normalized_opp_slug == normalized_team_slug:
+                        team_data = opp_info
+                    else:
+                        opponent_data = opp_info
+                
+                # If we couldn't match by slug, just use the first two opponents
+                if not team_data or not opponent_data:
+                    team_data = opponents[0].get("opponent", {})
+                    opponent_data = opponents[1].get("opponent", {})
+                
+                # Extract scores from results array if we want to see scores                
+                team_score = None
+                opponent_score = None
+                if self.show_score:
+                    results = match_data.get("results", [])
+                    
+                    if results and len(results) >= 2:
+                        # Try to match scores to teams by team_id
+                        team_id = team_data.get("id")
+                        opponent_id = opponent_data.get("id")
+                        
+                        for result in results:
+                            if result.get("team_id") == team_id:
+                                team_score = result.get("score")
+                            elif result.get("team_id") == opponent_id:
+                                opponent_score = result.get("score")
+                        
+                        # If we couldn't match by ID, just use the order
+                        if team_score is None and opponent_score is None:
+                            team_score = results[0].get("score")
+                            opponent_score = results[1].get("score")
+                
+                # Extract team info
+                team_slug_clean = team_data.get("slug", team_data.get("acronym", self.name))
+                team = {
+                    "abbrev": team_slug_clean,
+                    "name": team_data.get("name", "Unknown"),
+                    "link": f"https://liquipedia.net/counterstrike/{team_slug_clean}",
+                    "logo": team_data.get("image_url", ""),
+                    "score": team_score,
+                }
+                
+                # Extract opponent info
+                opponent_slug = opponent_data.get("slug", opponent_data.get("acronym", ""))
+                opponent = {
+                    "abbrev": opponent_slug,
+                    "name": opponent_data.get("name", "Unknown"),
+                    "link": f"https://liquipedia.net/counterstrike/{opponent_slug}" if opponent_slug else "",
+                    "logo": opponent_data.get("image_url", ""),
+                    "score": opponent_score,
+                }
+            
+            # Extract tournament info
+            tournament_data = match_data.get("tournament", {})
+            league_data = match_data.get("league", {})
+            serie_data = match_data.get("serie", {})
+            
+            tournament_name = (
+                serie_data.get("full_name") or 
+                serie_data.get("name") or 
+                tournament_data.get("name") or 
+                league_data.get("name") or 
+                "Unknown"
+            )
+            
+            # Try to generate a Liquipedia link from the tournament slug
+            tournament_slug = (
+                serie_data.get("slug") or 
+                tournament_data.get("slug") or 
+                league_data.get("slug") or 
+                ""
+            )
+            
+            tournament_link = ""
+            if tournament_slug:
+                # Convert slug to potential Liquipedia format
+                # Remove cs-go or cs-2 prefix if present
+                clean_slug = tournament_slug.replace("cs-go-", "").replace("cs-2-", "")
+                # Capitalize words
+                clean_slug_parts = clean_slug.split("-")
+                clean_slug_formatted = "/".join([part.capitalize() for part in clean_slug_parts])
+                tournament_link = f"https://liquipedia.net/counterstrike/{clean_slug_formatted}"
+            
+            tournament = {
+                "name": tournament_name,
+                "link": tournament_link,
+            }
+                    
+            next_match = {
+                "start_time": match_timestamp,
+            }
+            
+            result = {
+                "team": team,
+                "opponent": opponent,
+                "tournament": tournament,
+                "next_match": next_match,
+                "match_status": match_status,
+                "timestamp_string": match_timestamp_string,
+            }
+            
+            return result
+                
+        except Exception as e:
+            _LOGGER.info("caught an exception: %s", e)
+            return None
 
     @property
     def team_name(self):
@@ -523,95 +340,9 @@ class CounterstrikeEntity(Entity):
 
     async def update_data(self, *_):
     # Use different sources based on match type
-        _LOGGER.info("In update_data for %s - %s", self._team_name, self._match_state)
-        if self._match_state == "upcoming":
-            # For upcoming matches, use the team page
-            team_url = f"https://liquipedia.net/counterstrike/{self._team_name}"
-            soup = await get_soup_object(team_url)
-            _LOGGER.info("Fetched team page for %s", self._team_name)
-
-            # Find the carousel container
-            carousel_container = soup.find("div", attrs={"data-switch-group-container": "countdown"})
-            if not carousel_container:
-                _LOGGER.info("Could not find carousel container for team %s", self._team_name)
-                self._state = "NOT_FOUND"
-                self._extra_state_attributes = {
-                    "last_update": datetime.now(),
-                }
-                return
-
-            # Navigate to carousel content
-            carousel = carousel_container.find("div", class_="carousel")
-            if not carousel:
-                _LOGGER.info("Could not find carousel element for team %s", self._team_name)
-                self._state = "NOT_FOUND"
-                self._extra_state_attributes = {
-                    "last_update": datetime.now(),
-                }
-                return
-
-            carousel_content = carousel.find("div", class_="carousel-content")
-            if not carousel_content:
-                _LOGGER.info("Could not find carousel content for team %s", self._team_name)
-                self._state = "NOT_FOUND"
-                self._extra_state_attributes = {
-                    "last_update": datetime.now(),
-                }
-                return
-
-            # Get all carousel items and find the first future match
-            carousel_items = carousel_content.find_all("div", class_="carousel-item")
-
-            # Find the first match that is in the future
-            match_container = None
-            current_time = datetime.now()
-
-            for idx, carousel_item in enumerate(carousel_items):
-                # Get the match-info-vertical div
-                temp_container = carousel_item.find("div", class_="match-info--vertical")
-                if not temp_container:
-                    continue
-
-                # Check the timestamp
-                timer_span = temp_container.find("span", class_="timer-object")
-                if timer_span:
-                    match_timestamp_string = timer_span.get("data-timestamp", "").strip()
-                    if match_timestamp_string:
-                        match_timestamp = datetime.fromtimestamp(int(match_timestamp_string))
-                        if match_timestamp > current_time:
-                            match_container = temp_container
-                            break
-
-            try:
-                if match_container is not None: # This can happen if only 1 match is present on a team page but it's in the past.
-                    result = await self.process_team_page_match(match_container)
-                else:
-                    self._state = "NOT_FOUND"
-                    self._extra_state_attributes = {
-                        "last_update": datetime.now(),
-                    }
-
-            except Exception as e:
-                _LOGGER.info(f"Error parsing matches page match data: {e}")
-                self._state = "NOT_FOUND"
-                self._extra_state_attributes = {
-                    "last_update": datetime.now(),
-                }
-
-        else:
-            # For completed matches, use the team's /Matches page
-            matches_url = f"https://liquipedia.net/counterstrike/{self._team_name}/Matches"
-            soup = await get_soup_object(matches_url)
-
-            try:
-                result = await self.process_matches_page_match(soup)
-
-            except Exception as e:
-                _LOGGER.info(f"Error parsing matches page match data: {e}")
-                self._state = "NOT_FOUND"
-                self._extra_state_attributes = {
-                    "last_update": datetime.now(),
-                }
+        _LOGGER.info("In update_data for %s", self._team_name)
+ 
+        result = await self.fetch_team_match()
 
         if result is None:
             self._state = "NOT_FOUND"
@@ -648,8 +379,6 @@ class CounterstrikeEntity(Entity):
         update_text = (
             "Updated data for "
             + self._team_name
-            + " and match state "
-            + self._match_state
         )
         _LOGGER.debug(update_text)
         self.async_write_ha_state()
